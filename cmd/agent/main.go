@@ -17,6 +17,11 @@ import (
 	"github.com/gjcourt/modemscope/internal/hitron"
 )
 
+// scrapeTimeoutAssumption mirrors the scrapeTimeout in the homelab
+// ServiceMonitor. It lives in another repo, so this is an assumption we warn
+// against rather than a value we can enforce.
+const scrapeTimeoutAssumption = 10 * time.Second
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := run(); err != nil {
@@ -28,33 +33,53 @@ func main() {
 func run() error {
 	listenAddr := os.Getenv("MODEMSCOPE_LISTEN_ADDR")
 	if listenAddr == "" {
-		listenAddr = ":9103"
+		listenAddr = ":9104"
 	}
 	modemURL := os.Getenv("MODEMSCOPE_MODEM_URL")
 	if modemURL == "" {
 		modemURL = "https://192.168.100.1"
 	}
-	timeout := 10 * time.Second
+	// Total budget for one scrape's worth of modem I/O. Keep it below the
+	// Prometheus scrape timeout (10s in the ServiceMonitor) — otherwise a slow
+	// modem makes Prometheus give up before modemscope_up=0 is delivered.
+	budget := 8 * time.Second
 	if v := os.Getenv("MODEMSCOPE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return err
 		}
-		timeout = d
+		budget = d
+	}
+	// The point of the budget is to finish before Prometheus gives up, so a
+	// too-large value silently defeats it: the scrape times out and up=0 never
+	// lands. Warn rather than fail — we can't see the ServiceMonitor from here,
+	// so the scrape timeout is an assumption, not a fact.
+	if budget >= scrapeTimeoutAssumption {
+		slog.Warn("MODEMSCOPE_TIMEOUT is at or above the assumed Prometheus scrape timeout; "+
+			"a slow modem will time out the scrape before modemscope_up=0 is delivered",
+			"budget", budget, "assumed_scrape_timeout", scrapeTimeoutAssumption)
 	}
 
-	client := hitron.NewClient(modemURL, timeout)
+	// The Collect context bounds total modem I/O to the budget; this per-request
+	// timeout is only a backstop against a single hung request.
+	client := hitron.NewClient(modemURL, budget)
 	log := slog.Default()
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		hitron.NewCollector(client, log),
+		hitron.NewCollector(client, log, budget),
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	// Concurrent scrapes are coalesced inside the collector (see hitron.fetch),
+	// so the modem is protected without rejecting a scrape here —
+	// MaxRequestsInFlight would 503 the second caller, which Prometheus reads as
+	// the exporter being down.
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+		Timeout: budget + time.Second,
+	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		// Liveness is "the exporter is running", deliberately not "the modem is
 		// reachable" — an unreachable modem is a metric (modemscope_up 0), not a
