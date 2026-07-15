@@ -157,6 +157,11 @@ func TestCollectUnreachableEmitsOnlyUp(t *testing.T) {
 // The exporter is expected to start while the modem is mid-reboot (this modem
 // reboots often). Registration must not freeze the metric set to the degraded
 // one — every metric has to appear once the modem returns.
+//
+// Uses a pedantic registry deliberately: a plain one never checks collected
+// metrics against the described set, so this would pass no matter what Describe
+// emitted. Pedantic mode enforces that Describe covers everything Collect can
+// produce, which is the property actually worth guarding.
 func TestRegisterWhileDownThenRecover(t *testing.T) {
 	t.Parallel()
 	healthy := &atomic.Bool{} // starts down
@@ -165,12 +170,12 @@ func TestRegisterWhileDownThenRecover(t *testing.T) {
 	c := newTestCollector(t, srv.URL)
 	// Disable result coalescing: this test asserts the metric set isn't frozen by
 	// a failed registration, which is independent of caching. With the default
-	// TTL the recovery Gather would replay Register's cached failure purely
-	// because the test runs faster than the TTL (in production the 30s scrape
-	// interval is far wider).
+	// TTL the recovery Gather would replay a cached failure purely because the
+	// test runs faster than the TTL (in production the 30s scrape interval is far
+	// wider).
 	c.ttl = 0
 
-	reg := prometheus.NewRegistry()
+	reg := prometheus.NewPedanticRegistry()
 	if err := reg.Register(c); err != nil {
 		t.Fatalf("Register while modem down: %v", err)
 	}
@@ -216,28 +221,27 @@ func TestConcurrentScrapesCoalesce(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
+	// Must hit a COLD cache: registering first would warm it via Describe and the
+	// concurrent scrapes would all be cache hits, making this assert nothing (the
+	// mutex could be deleted and it would still pass).
 	c := NewCollector(NewClient(srv.URL, 3*time.Second), quietLogger(), 3*time.Second)
-	reg := prometheus.NewRegistry()
-	if err := reg.Register(c); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	atomic.StoreInt64(&hits, 0) // ignore the Describe-time fetch
 
+	const scrapes = 5
 	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
+	for range scrapes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := reg.Gather(); err != nil {
-				t.Errorf("Gather: %v", err)
-			}
+			ch := make(chan prometheus.Metric, 128)
+			c.Collect(ch)
 		}()
 	}
 	wg.Wait()
 
-	// 6 endpoints for one shared fetch. Without coalescing this would be ~30.
-	if got := atomic.LoadInt64(&hits); got > 6 {
-		t.Errorf("5 concurrent scrapes made %d modem requests, want <=6 (one coalesced fetch)", got)
+	// Exactly one fetch's worth: 6 endpoints. Uncoalesced this is 5*6 = 30.
+	if got := atomic.LoadInt64(&hits); got != 6 {
+		t.Errorf("%d concurrent cold-cache scrapes made %d modem requests, want exactly 6 (one coalesced fetch)",
+			scrapes, got)
 	}
 }
 

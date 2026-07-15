@@ -119,8 +119,22 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 }
 
 // Describe implements prometheus.Collector.
+//
+// The descriptors are listed explicitly rather than via DescribeByCollect,
+// which would run a full Collect — and therefore a real modem fetch — during
+// registration. That would block startup on up to one budget of I/O (bad for a
+// modem that reboots every few minutes), seed the cache with a startup-time
+// result, and make any concurrency test that registers first meaningless,
+// because registration would have already warmed the cache.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
-	prometheus.DescribeByCollect(c, ch)
+	for _, d := range []*prometheus.Desc{
+		c.up, c.scrapeDuration, c.info, c.uptime,
+		c.dsSNR, c.dsPower, c.dsFreq, c.dsOctets, c.dsCorrected, c.dsUncorrect, c.dsChannels,
+		c.usPower, c.usFreq, c.usBandwidth, c.usChannels,
+		c.initState, c.networkAcces,
+	} {
+		ch <- d
+	}
 }
 
 // Collect implements prometheus.Collector.
@@ -192,8 +206,15 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // fetch reads the modem, coalescing concurrent scrapes onto one request set.
-// The lock is deliberately held across the I/O so a second scrape waits for the
-// in-flight result rather than starting a competing one.
+//
+// The TTL does the coalescing, not the mutex: a waiter blocks on the lock,
+// acquires it after the in-flight fetch completes, re-checks the TTL, and finds
+// the just-stored result. The mutex alone only serializes — with ttl=0 five
+// concurrent scrapes still produce five full fetches (measured: 30 requests).
+//
+// So ttl must stay > 0: it is load-bearing protection for a fragile embedded
+// server, not a caching nicety. Dropping it to chase fresher samples silently
+// restores the dogpile and multiplies waiter latency by the scrape count.
 func (c *Collector) fetch(ctx context.Context) (*Status, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

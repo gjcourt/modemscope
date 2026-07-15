@@ -17,6 +17,11 @@ import (
 	"github.com/gjcourt/modemscope/internal/hitron"
 )
 
+// scrapeTimeoutAssumption mirrors the scrapeTimeout in the homelab
+// ServiceMonitor. It lives in another repo, so this is an assumption we warn
+// against rather than a value we can enforce.
+const scrapeTimeoutAssumption = 10 * time.Second
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err := run(); err != nil {
@@ -45,8 +50,18 @@ func run() error {
 		}
 		budget = d
 	}
+	// The point of the budget is to finish before Prometheus gives up, so a
+	// too-large value silently defeats it: the scrape times out and up=0 never
+	// lands. Warn rather than fail — we can't see the ServiceMonitor from here,
+	// so the scrape timeout is an assumption, not a fact.
+	if budget >= scrapeTimeoutAssumption {
+		slog.Warn("MODEMSCOPE_TIMEOUT is at or above the assumed Prometheus scrape timeout; "+
+			"a slow modem will time out the scrape before modemscope_up=0 is delivered",
+			"budget", budget, "assumed_scrape_timeout", scrapeTimeoutAssumption)
+	}
 
-	// Fetch makes six sequential requests, so no single one may eat the budget.
+	// The Collect context bounds total modem I/O to the budget; this per-request
+	// timeout is only a backstop against a single hung request.
 	client := hitron.NewClient(modemURL, budget)
 	log := slog.Default()
 
