@@ -28,7 +28,7 @@ func main() {
 func run() error {
 	listenAddr := os.Getenv("MODEMSCOPE_LISTEN_ADDR")
 	if listenAddr == "" {
-		listenAddr = ":9103"
+		listenAddr = ":9104"
 	}
 	modemURL := os.Getenv("MODEMSCOPE_MODEM_URL")
 	if modemURL == "" {

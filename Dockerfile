@@ -18,5 +18,5 @@ FROM gcr.io/distroless/static-debian12:latest AS runtime
 COPY --from=builder /out/modemscope-agent /modemscope-agent
 
 USER 65532:65532
-EXPOSE 9103
+EXPOSE 9104
 ENTRYPOINT ["/modemscope-agent"]

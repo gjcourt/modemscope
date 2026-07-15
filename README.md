@@ -63,7 +63,7 @@ min(modemscope_docsis_init_state) == 0
 
 | Env | Default | |
 | --- | --- | --- |
-| `MODEMSCOPE_LISTEN_ADDR` | `:9103` | metrics listen address |
+| `MODEMSCOPE_LISTEN_ADDR` | `:9104` | metrics listen address |
 | `MODEMSCOPE_MODEM_URL` | `https://192.168.100.1` | modem base URL |
 | `MODEMSCOPE_TIMEOUT` | `10s` | per-scrape HTTP timeout |
 
@@ -89,6 +89,6 @@ unreachable modem is a metric worth alerting on, not a reason to restart the pod
 
 ```sh
 go test ./...
-go run ./cmd/agent          # then: curl localhost:9103/metrics
+go run ./cmd/agent          # then: curl localhost:9104/metrics
 make build                  # ghcr.io/gjcourt/modemscope:dev
 ```
