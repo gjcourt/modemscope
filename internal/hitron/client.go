@@ -81,6 +81,48 @@ type USChannel struct {
 	SignalStrength string `json:"signalStrength"`
 }
 
+// DSOFDMChannel is one downstream OFDM receiver from /data/dsofdminfo.asp.
+//
+// On DOCSIS 3.1 the OFDM carrier does most of the work, so its error counters
+// matter more than the legacy QAM channels'. Unused receivers report "NO" locks
+// and "NA" everywhere; only locked receivers carry real numbers.
+type DSOFDMChannel struct {
+	Receive    string `json:"receive"`
+	FFTType    string `json:"ffttype"`
+	Subcarrier string `json:"Subcarr0freqFreq"`
+	PLCLock    string `json:"plclock"`
+	NCPLock    string `json:"ncplock"`
+	MDC1Lock   string `json:"mdc1lock"`
+	PLCPower   string `json:"plcpower"`
+	SNR        string `json:"SNR"`
+	DSOctets   string `json:"dsoctets"`
+	Correcteds string `json:"correcteds"`
+	Uncorrect  string `json:"uncorrect"`
+}
+
+// Locked reports whether this OFDM receiver is carrying traffic. An unlocked
+// receiver's other fields are "NA" placeholders and must not be exported as 0.
+func (c DSOFDMChannel) Locked() bool {
+	return strings.EqualFold(strings.TrimSpace(c.PLCLock), "yes")
+}
+
+// USOFDMChannel is one upstream OFDMA channel from /data/usofdminfo.asp.
+type USOFDMChannel struct {
+	Index     string `json:"uschindex"`
+	State     string `json:"state"`
+	Frequency string `json:"frequency"`
+	DigAtten  string `json:"digAtten"`
+	ChannelBw string `json:"channelBw"`
+	RepPower  string `json:"repPower"`
+	FFTVal    string `json:"fftVal"`
+}
+
+// Enabled reports whether this OFDMA channel is in use. Comcast commonly leaves
+// upstream OFDMA disabled, which is not a fault.
+func (c USOFDMChannel) Enabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(c.State), "disabled")
+}
+
 // CMInit is /data/getCMInit.asp — the DOCSIS registration state machine.
 type CMInit struct {
 	HWInit         string `json:"hwInit"`
@@ -105,12 +147,14 @@ type DocsisWan struct {
 
 // Status is a full snapshot of the modem.
 type Status struct {
-	SysInfo    SysInfo
-	Model      Model
-	Downstream []DSChannel
-	Upstream   []USChannel
-	CMInit     CMInit
-	DocsisWan  DocsisWan
+	SysInfo        SysInfo
+	Model          Model
+	Downstream     []DSChannel
+	Upstream       []USChannel
+	DownstreamOFDM []DSOFDMChannel
+	UpstreamOFDM   []USOFDMChannel
+	CMInit         CMInit
+	DocsisWan      DocsisWan
 }
 
 func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
@@ -172,6 +216,12 @@ func (c *Client) Fetch(ctx context.Context) (*Status, error) {
 		return nil, err
 	}
 	if s.Upstream, err = getSlice[USChannel](ctx, c, "/data/usinfo.asp"); err != nil {
+		return nil, err
+	}
+	if s.DownstreamOFDM, err = getSlice[DSOFDMChannel](ctx, c, "/data/dsofdminfo.asp"); err != nil {
+		return nil, err
+	}
+	if s.UpstreamOFDM, err = getSlice[USOFDMChannel](ctx, c, "/data/usofdminfo.asp"); err != nil {
 		return nil, err
 	}
 	if s.CMInit, err = getOne[CMInit](ctx, c, "/data/getCMInit.asp"); err != nil {

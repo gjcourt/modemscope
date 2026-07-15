@@ -29,6 +29,8 @@ func modemServer(t *testing.T, healthy *atomic.Bool) *httptest.Server {
 		"/data/usinfo.asp":         `[{"portId":"1","channelId":"1","frequency":"10400000","bandwidth":"3200000","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.760"}]`,
 		"/data/getCMInit.asp":      `[{"hwInit":"Success","findDownstream":"Success","ranging":"Success","dhcp":"Success","timeOfday":"Success","downloadCfg":"Success","registration":"Success","eaeStatus":"Disable","bpiStatus":"AUTH:authorized, TEK:operational","networkAccess":"Permitted","trafficStatus":"Enable"}]`,
 		"/data/getCmDocsisWan.asp": `[{"Configname":"d11_m_coda56_subnxmgig_c01.cm","NetworkAccess":"Permitted","CmIpAddress":"2001:db8::1"}]`,
+		"/data/dsofdminfo.asp":     `[{"receive":"0","ffttype":"NA","Subcarr0freqFreq":"NA","plclock":"NO","ncplock":"NO","mdc1lock":"NO","plcpower":"NA","SNR":"NA","dsoctets":"NA","correcteds":"NA","uncorrect":"NA"},{"receive":"1","ffttype":"4K","Subcarr0freqFreq":" 713600000","plclock":"YES","ncplock":"YES","mdc1lock":"YES","plcpower":"-5.200001","SNR":"38","dsoctets":"3211241","correcteds":"3206076","uncorrect":"1432"}]`,
+		"/data/usofdminfo.asp":     `[{"uschindex":"0","state":"  DISABLED","frequency":"0","digAtten":"    0.0000","digAttenBo":"    0.0000","channelBw":"    0.0000","repPower":"    0.0000","repPower1_6":"    0.0000","fftVal":"2K"}]`,
 		"/data/system_model.asp":   `{"modelName":"CODA","vendorname":"HITRON"}`,
 	}
 	mux := http.NewServeMux()
@@ -208,6 +210,8 @@ func TestConcurrentScrapesCoalesce(t *testing.T) {
 		"/data/usinfo.asp":         `[{"portId":"1","channelId":"1","frequency":"1","bandwidth":"1","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.7"}]`,
 		"/data/getCMInit.asp":      `[{"hwInit":"Success","findDownstream":"Success","ranging":"Success","dhcp":"Success","timeOfday":"Success","downloadCfg":"Success","registration":"Success","eaeStatus":"Disable","bpiStatus":"AUTH:authorized, TEK:operational","networkAccess":"Permitted","trafficStatus":"Enable"}]`,
 		"/data/getCmDocsisWan.asp": `[{"Configname":"c","NetworkAccess":"Permitted","CmIpAddress":"::1"}]`,
+		"/data/dsofdminfo.asp":     `[{"receive":"0","ffttype":"NA","Subcarr0freqFreq":"NA","plclock":"NO","ncplock":"NO","mdc1lock":"NO","plcpower":"NA","SNR":"NA","dsoctets":"NA","correcteds":"NA","uncorrect":"NA"},{"receive":"1","ffttype":"4K","Subcarr0freqFreq":" 713600000","plclock":"YES","ncplock":"YES","mdc1lock":"YES","plcpower":"-5.200001","SNR":"38","dsoctets":"3211241","correcteds":"3206076","uncorrect":"1432"}]`,
+		"/data/usofdminfo.asp":     `[{"uschindex":"0","state":"  DISABLED","frequency":"0","digAtten":"    0.0000","digAttenBo":"    0.0000","channelBw":"    0.0000","repPower":"    0.0000","repPower1_6":"    0.0000","fftVal":"2K"}]`,
 		"/data/system_model.asp":   `{"modelName":"CODA","vendorname":"HITRON"}`,
 	}
 	for path, body := range bodies {
@@ -238,10 +242,13 @@ func TestConcurrentScrapesCoalesce(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Exactly one fetch's worth: 6 endpoints. Uncoalesced this is 5*6 = 30.
-	if got := atomic.LoadInt64(&hits); got != 6 {
-		t.Errorf("%d concurrent cold-cache scrapes made %d modem requests, want exactly 6 (one coalesced fetch)",
-			scrapes, got)
+	// Exactly one fetch's worth: one request per endpoint. Uncoalesced this
+	// would be scrapes * endpoints. Derived from the fixture so adding an
+	// endpoint doesn't silently weaken the assertion.
+	wantHits := int64(len(bodies))
+	if got := atomic.LoadInt64(&hits); got != wantHits {
+		t.Errorf("%d concurrent cold-cache scrapes made %d modem requests, want exactly %d (one coalesced fetch); uncoalesced would be %d",
+			scrapes, got, wantHits, int64(scrapes)*wantHits)
 	}
 }
 

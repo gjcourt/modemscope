@@ -94,6 +94,14 @@ func fakeModem(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/data/usinfo.asp", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"portId":"1","frequency":"10400000","bandwidth":"3200000","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.760","channelId":"1"}]`))
 	})
+	// Two OFDM receivers: an unused one ("NA" placeholders everywhere) and a
+	// locked one carrying real values — exactly what the CODA-56 returns.
+	mux.HandleFunc("/data/dsofdminfo.asp", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"receive":"0","ffttype":"NA","Subcarr0freqFreq":"NA","plclock":"NO","ncplock":"NO","mdc1lock":"NO","plcpower":"NA","SNR":"NA","dsoctets":"NA","correcteds":"NA","uncorrect":"NA"},{"receive":"1","ffttype":"4K","Subcarr0freqFreq":" 713600000","plclock":"YES","ncplock":"YES","mdc1lock":"YES","plcpower":"-5.200001","SNR":"38","dsoctets":"3211241","correcteds":"3206076","uncorrect":"1432"}]`))
+	})
+	mux.HandleFunc("/data/usofdminfo.asp", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"uschindex":"0","state":"  DISABLED","frequency":"0","digAtten":"    0.0000","digAttenBo":"    0.0000","channelBw":"    0.0000","repPower":"    0.0000","repPower1_6":"    0.0000","fftVal":"2K"}]`))
+	})
 	mux.HandleFunc("/data/getCMInit.asp", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"hwInit":"Success","findDownstream":"Success","ranging":"Success","dhcp":"Success","timeOfday":"Success","downloadCfg":"Success","registration":"Success","eaeStatus":"Disable","bpiStatus":"AUTH:authorized, TEK:operational","networkAccess":"Permitted","trafficStatus":"Enable"}]`))
 	})
@@ -135,6 +143,33 @@ func TestFetch(t *testing.T) {
 	}
 	if st.DocsisWan.ConfigName != "d11_m_coda56_subnxmgig_c01.cm" {
 		t.Errorf("ConfigName = %q", st.DocsisWan.ConfigName)
+	}
+
+	// OFDM is where DOCSIS 3.1 trouble shows up first, so its parsing matters most.
+	if len(st.DownstreamOFDM) != 2 {
+		t.Fatalf("DownstreamOFDM = %d receivers, want 2", len(st.DownstreamOFDM))
+	}
+	if st.DownstreamOFDM[0].Locked() {
+		t.Error("receiver 0 reports locked; plclock is NO")
+	}
+	if !st.DownstreamOFDM[1].Locked() {
+		t.Error("receiver 1 reports unlocked; plclock is YES")
+	}
+	if got := st.DownstreamOFDM[1].Uncorrect; got != "1432" {
+		t.Errorf("OFDM uncorrect = %q, want 1432", got)
+	}
+	// The padded value must parse — Hitron pads these with leading spaces.
+	if f, ok := parseFloat(st.DownstreamOFDM[1].Subcarrier); !ok || f != 713600000 {
+		t.Errorf("OFDM subcarrier %q -> %v,%v; want 713600000,true (leading space must not break parsing)",
+			st.DownstreamOFDM[1].Subcarrier, f, ok)
+	}
+	// An unlocked receiver's "NA" must be reported absent, never as 0 — a 0 would
+	// read as a perfectly clean channel instead of a missing one.
+	if _, ok := parseFloat(st.DownstreamOFDM[0].SNR); ok {
+		t.Error(`unlocked receiver SNR "NA" parsed as a number; must be absent`)
+	}
+	if len(st.UpstreamOFDM) != 1 || st.UpstreamOFDM[0].Enabled() {
+		t.Errorf("UpstreamOFDM = %+v; want one DISABLED channel (padded state must trim)", st.UpstreamOFDM)
 	}
 }
 

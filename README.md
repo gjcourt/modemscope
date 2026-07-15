@@ -39,6 +39,14 @@ Uptime is the only signal that distinguishes the two.
 | `modemscope_upstream_power_dbmv{channel,port}` | Upstream transmit power. Healthy ≈ 35..51 dBmV. |
 | `modemscope_upstream_frequency_hz{channel,port}` / `..._bandwidth_hz{..}` | Upstream channel shape. |
 | `modemscope_upstream_channels` | Bonded upstream channel count. |
+| `modemscope_downstream_ofdm_locked{receiver}` | 1 if the OFDM receiver has PLC lock. |
+| `modemscope_downstream_ofdm_snr_db{receiver}` | **DOCSIS 3.1 OFDM SNR.** |
+| `modemscope_downstream_ofdm_plc_power_dbmv{receiver}` | OFDM PLC received power. |
+| `modemscope_downstream_ofdm_uncorrectables_total{receiver}` | **Uncorrectables on the OFDM carrier — the single most important error signal on a 3.1 line.** |
+| `modemscope_downstream_ofdm_correcteds_total{receiver}` | FEC-corrected codewords on the OFDM carrier. |
+| `modemscope_downstream_ofdm_octets_total{receiver}` | OFDM octets. |
+| `modemscope_downstream_ofdm_subcarrier0_hz{receiver}` | OFDM subcarrier-0 frequency. |
+| `modemscope_upstream_ofdma_enabled{channel}` | 1 if upstream OFDMA is enabled (commonly 0 on Comcast; not a fault). |
 | `modemscope_docsis_init_state{stage}` | 1 = healthy. Stages: `hw_init`, `find_downstream`, `ranging`, `dhcp`, `time_of_day`, `download_cfg`, `registration`, `bpi`, `traffic`. |
 | `modemscope_network_access` | 1 if the CMTS permits the modem on the network. |
 | `modemscope_scrape_duration_seconds` | Scrape latency (~0.2s typical). |
@@ -49,8 +57,15 @@ The counters **reset on reboot**, so always use `rate()` / `increase()` — they
 handle resets correctly — and never compare raw totals across a restart.
 
 ```promql
-# Uncorrectables appearing — the line is degrading (this is the alert to have)
-sum(rate(modemscope_downstream_uncorrectables_total[15m])) > 0
+# Uncorrectables appearing anywhere — QAM *or* OFDM. On DOCSIS 3.1 the OFDM
+# carrier does most of the work and degrades first, so watching only the QAM
+# channels can report a clean line while the real carrier is losing data.
+sum(rate(modemscope_downstream_uncorrectables_total[15m]))
+  + sum(rate(modemscope_downstream_ofdm_uncorrectables_total[15m])) > 0
+
+# Did the errors arrive continuously, or in bursts around each reboot? This is
+# what a point-in-time snapshot cannot tell you.
+rate(modemscope_downstream_ofdm_uncorrectables_total[5m])
 
 # The modem rebooted in the last 15m (uptime went backwards)
 resets(modemscope_uptime_seconds[15m]) > 0

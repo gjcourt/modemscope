@@ -52,6 +52,18 @@ type Collector struct {
 	usChannels   *prometheus.Desc
 	initState    *prometheus.Desc
 	networkAcces *prometheus.Desc
+
+	ofdmLocked      *prometheus.Desc
+	ofdmSNR         *prometheus.Desc
+	ofdmPower       *prometheus.Desc
+	ofdmFreq        *prometheus.Desc
+	ofdmOctets      *prometheus.Desc
+	ofdmCorrected   *prometheus.Desc
+	ofdmUncorrect   *prometheus.Desc
+	usOFDMEnabled   *prometheus.Desc
+	usOFDMFreq      *prometheus.Desc
+	usOFDMPower     *prometheus.Desc
+	usOFDMChannelBw *prometheus.Desc
 }
 
 // NewCollector returns a Collector reading from client.
@@ -115,6 +127,39 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 			[]string{"stage"}, nil),
 		networkAcces: prometheus.NewDesc(namespace+"_network_access",
 			"1 if the CMTS permits the modem on the network.", nil, nil),
+
+		// DOCSIS 3.1 OFDM. This carrier does most of the work, and being high in
+		// the band it degrades before the QAM channels do — so it fails first and
+		// is where trouble shows up first. Watching only the QAM channels can
+		// report a clean line while the OFDM carrier is losing data.
+		ofdmLocked: prometheus.NewDesc(namespace+"_downstream_ofdm_locked",
+			"1 if this OFDM receiver has PLC lock. Unlocked receivers report no other values.",
+			[]string{"receiver"}, nil),
+		ofdmSNR: prometheus.NewDesc(namespace+"_downstream_ofdm_snr_db",
+			"Downstream OFDM signal-to-noise ratio (dB).", []string{"receiver"}, nil),
+		ofdmPower: prometheus.NewDesc(namespace+"_downstream_ofdm_plc_power_dbmv",
+			"Downstream OFDM PLC received power (dBmV).", []string{"receiver"}, nil),
+		ofdmFreq: prometheus.NewDesc(namespace+"_downstream_ofdm_subcarrier0_hz",
+			"Downstream OFDM subcarrier-0 frequency (Hz).", []string{"receiver"}, nil),
+		ofdmOctets: prometheus.NewDesc(namespace+"_downstream_ofdm_octets_total",
+			"Downstream OFDM octets. Resets when the modem reboots.", []string{"receiver"}, nil),
+		ofdmCorrected: prometheus.NewDesc(namespace+"_downstream_ofdm_correcteds_total",
+			"FEC-corrected codewords on the OFDM carrier. Resets when the modem reboots.",
+			[]string{"receiver"}, nil),
+		ofdmUncorrect: prometheus.NewDesc(namespace+"_downstream_ofdm_uncorrectables_total",
+			"Uncorrectable codewords on the OFDM carrier — unrecoverable data, i.e. real loss. "+
+				"The most important error signal on a DOCSIS 3.1 line. Resets when the modem reboots.",
+			[]string{"receiver"}, nil),
+
+		usOFDMEnabled: prometheus.NewDesc(namespace+"_upstream_ofdma_enabled",
+			"1 if this upstream OFDMA channel is enabled. Commonly 0 on Comcast; not a fault.",
+			[]string{"channel"}, nil),
+		usOFDMFreq: prometheus.NewDesc(namespace+"_upstream_ofdma_frequency_hz",
+			"Upstream OFDMA centre frequency (Hz).", []string{"channel"}, nil),
+		usOFDMPower: prometheus.NewDesc(namespace+"_upstream_ofdma_power_dbmv",
+			"Upstream OFDMA reported transmit power (dBmV).", []string{"channel"}, nil),
+		usOFDMChannelBw: prometheus.NewDesc(namespace+"_upstream_ofdma_bandwidth_hz",
+			"Upstream OFDMA channel bandwidth (Hz).", []string{"channel"}, nil),
 	}
 }
 
@@ -132,6 +177,9 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 		c.dsSNR, c.dsPower, c.dsFreq, c.dsOctets, c.dsCorrected, c.dsUncorrect, c.dsChannels,
 		c.usPower, c.usFreq, c.usBandwidth, c.usChannels,
 		c.initState, c.networkAcces,
+		c.ofdmLocked, c.ofdmSNR, c.ofdmPower, c.ofdmFreq,
+		c.ofdmOctets, c.ofdmCorrected, c.ofdmUncorrect,
+		c.usOFDMEnabled, c.usOFDMFreq, c.usOFDMPower, c.usOFDMChannelBw,
 	} {
 		ch <- d
 	}
@@ -185,6 +233,36 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		emit(ch, c.usPower, prometheus.GaugeValue, uc.SignalStrength, lbl)
 		emit(ch, c.usFreq, prometheus.GaugeValue, uc.Frequency, lbl)
 		emit(ch, c.usBandwidth, prometheus.GaugeValue, uc.Bandwidth, lbl)
+	}
+
+	for _, oc := range status.DownstreamOFDM {
+		lbl := []string{oc.Receive}
+		ch <- prometheus.MustNewConstMetric(c.ofdmLocked, prometheus.GaugeValue,
+			boolToFloat(oc.Locked()), oc.Receive)
+		if !oc.Locked() {
+			// An unlocked receiver reports "NA" for everything else. parseFloat
+			// rejects those, but skip explicitly: exporting zeros here would read
+			// as a perfectly quiet channel rather than an absent one.
+			continue
+		}
+		emit(ch, c.ofdmSNR, prometheus.GaugeValue, oc.SNR, lbl)
+		emit(ch, c.ofdmPower, prometheus.GaugeValue, oc.PLCPower, lbl)
+		emit(ch, c.ofdmFreq, prometheus.GaugeValue, oc.Subcarrier, lbl)
+		emit(ch, c.ofdmOctets, prometheus.CounterValue, oc.DSOctets, lbl)
+		emit(ch, c.ofdmCorrected, prometheus.CounterValue, oc.Correcteds, lbl)
+		emit(ch, c.ofdmUncorrect, prometheus.CounterValue, oc.Uncorrect, lbl)
+	}
+
+	for _, uo := range status.UpstreamOFDM {
+		lbl := []string{uo.Index}
+		ch <- prometheus.MustNewConstMetric(c.usOFDMEnabled, prometheus.GaugeValue,
+			boolToFloat(uo.Enabled()), uo.Index)
+		if !uo.Enabled() {
+			continue
+		}
+		emit(ch, c.usOFDMFreq, prometheus.GaugeValue, uo.Frequency, lbl)
+		emit(ch, c.usOFDMPower, prometheus.GaugeValue, uo.RepPower, lbl)
+		emit(ch, c.usOFDMChannelBw, prometheus.GaugeValue, uo.ChannelBw, lbl)
 	}
 
 	for stage, v := range map[string]string{
