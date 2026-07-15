@@ -1,0 +1,259 @@
+package hitron
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+)
+
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// modemServer serves the real CODA-56 payload shapes, and can be flipped to
+// "rebooting" (500s) mid-test.
+func modemServer(t *testing.T, healthy *atomic.Bool) *httptest.Server {
+	t.Helper()
+	bodies := map[string]string{
+		"/data/getSysInfo.asp":     `[{"hwVersion":"1A","swVersion":"7.3.5.3.2b1","serialNumber":"AN0000000000","rfMac":"00:11:22:33:44:55","wanIp":"TODO","systemUptime":"00h:05m:00s","systemTime":"Tue Jul 14, 2026, 20:20:28"}]`,
+		"/data/dsinfo.asp":         `[{"portId":"1","channelId":"20","frequency":"561000000","modulation":"2","signalStrength":"-1.100","snr":"38.983","dsoctets":"19840672","correcteds":"3","uncorrect":"7"}]`,
+		"/data/usinfo.asp":         `[{"portId":"1","channelId":"1","frequency":"10400000","bandwidth":"3200000","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.760"}]`,
+		"/data/getCMInit.asp":      `[{"hwInit":"Success","findDownstream":"Success","ranging":"Success","dhcp":"Success","timeOfday":"Success","downloadCfg":"Success","registration":"Success","eaeStatus":"Disable","bpiStatus":"AUTH:authorized, TEK:operational","networkAccess":"Permitted","trafficStatus":"Enable"}]`,
+		"/data/getCmDocsisWan.asp": `[{"Configname":"d11_m_coda56_subnxmgig_c01.cm","NetworkAccess":"Permitted","CmIpAddress":"2001:db8::1"}]`,
+		"/data/system_model.asp":   `{"modelName":"CODA","vendorname":"HITRON"}`,
+	}
+	mux := http.NewServeMux()
+	for path, body := range bodies {
+		b := body
+		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+			if healthy != nil && !healthy.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(b))
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func newTestCollector(t *testing.T, url string) *Collector {
+	t.Helper()
+	return NewCollector(NewClient(url, 2*time.Second), quietLogger(), 2*time.Second)
+}
+
+func TestCollectHealthy(t *testing.T) {
+	t.Parallel()
+	healthy := &atomic.Bool{}
+	healthy.Store(true)
+	srv := modemServer(t, healthy)
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newTestCollector(t, srv.URL)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	expected := `
+# HELP modemscope_up 1 if the modem status endpoints were scraped successfully.
+# TYPE modemscope_up gauge
+modemscope_up 1
+# HELP modemscope_uptime_seconds Modem uptime. A drop means the modem rebooted, which also resets every error counter below.
+# TYPE modemscope_uptime_seconds gauge
+modemscope_uptime_seconds 300
+# HELP modemscope_downstream_snr_db Downstream signal-to-noise ratio (dB). Below ~33 dB risks uncorrectable errors on 256QAM.
+# TYPE modemscope_downstream_snr_db gauge
+modemscope_downstream_snr_db{channel="20",port="1"} 38.983
+# HELP modemscope_downstream_uncorrectables_total Uncorrectable codewords — the leading indicator of plant trouble. Resets when the modem reboots.
+# TYPE modemscope_downstream_uncorrectables_total counter
+modemscope_downstream_uncorrectables_total{channel="20",port="1"} 7
+# HELP modemscope_upstream_power_dbmv Upstream transmit power (dBmV). Healthy range is roughly 35..51; sustained highs mean the modem is straining.
+# TYPE modemscope_upstream_power_dbmv gauge
+modemscope_upstream_power_dbmv{channel="1",port="1"} 46.76
+# HELP modemscope_network_access 1 if the CMTS permits the modem on the network.
+# TYPE modemscope_network_access gauge
+modemscope_network_access 1
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
+		"modemscope_up", "modemscope_uptime_seconds", "modemscope_downstream_snr_db",
+		"modemscope_downstream_uncorrectables_total", "modemscope_upstream_power_dbmv",
+		"modemscope_network_access"); err != nil {
+		t.Error(err)
+	}
+}
+
+// Error counters must be counters, not gauges: they reset on every modem reboot,
+// and only a counter lets rate()/increase() handle the reset correctly.
+func TestErrorCountersAreCounters(t *testing.T) {
+	t.Parallel()
+	healthy := &atomic.Bool{}
+	healthy.Store(true)
+	srv := modemServer(t, healthy)
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newTestCollector(t, srv.URL)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	want := map[string]string{
+		"modemscope_downstream_uncorrectables_total": "COUNTER",
+		"modemscope_downstream_correcteds_total":     "COUNTER",
+		"modemscope_downstream_octets_total":         "COUNTER",
+		"modemscope_uptime_seconds":                  "GAUGE",
+		"modemscope_downstream_snr_db":               "GAUGE",
+	}
+	seen := map[string]string{}
+	for _, mf := range mfs {
+		seen[mf.GetName()] = mf.GetType().String()
+	}
+	for name, typ := range want {
+		if got, ok := seen[name]; !ok {
+			t.Errorf("%s missing", name)
+		} else if got != typ {
+			t.Errorf("%s is %s, want %s", name, got, typ)
+		}
+	}
+}
+
+// On a failed scrape the collector must emit up=0 and nothing else — reporting
+// stale channel values as if fresh would misrepresent a dead modem as healthy.
+func TestCollectUnreachableEmitsOnlyUp(t *testing.T) {
+	t.Parallel()
+	healthy := &atomic.Bool{} // false: modem rebooting
+	srv := modemServer(t, healthy)
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newTestCollector(t, srv.URL)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if got := testutil.ToFloat64(mustGauge(t, reg, "modemscope_up")); got != 0 {
+		t.Errorf("modemscope_up = %v, want 0", got)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "modemscope_downstream_snr_db", "modemscope_uptime_seconds",
+			"modemscope_downstream_uncorrectables_total", "modemscope_info":
+			t.Errorf("%s present while modem unreachable; must be absent", mf.GetName())
+		}
+	}
+}
+
+// The exporter is expected to start while the modem is mid-reboot (this modem
+// reboots often). Registration must not freeze the metric set to the degraded
+// one — every metric has to appear once the modem returns.
+func TestRegisterWhileDownThenRecover(t *testing.T) {
+	t.Parallel()
+	healthy := &atomic.Bool{} // starts down
+	srv := modemServer(t, healthy)
+
+	c := newTestCollector(t, srv.URL)
+	// Disable result coalescing: this test asserts the metric set isn't frozen by
+	// a failed registration, which is independent of caching. With the default
+	// TTL the recovery Gather would replay Register's cached failure purely
+	// because the test runs faster than the TTL (in production the 30s scrape
+	// interval is far wider).
+	c.ttl = 0
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("Register while modem down: %v", err)
+	}
+
+	healthy.Store(true)
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather after recovery: %v", err)
+	}
+	var found bool
+	for _, mf := range mfs {
+		if mf.GetName() == "modemscope_downstream_snr_db" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("downstream metrics missing after the modem recovered")
+	}
+}
+
+// Concurrent scrapes must coalesce onto one set of modem requests: the modem's
+// embedded server is fragile, and a dogpile is exactly what breaks it.
+func TestConcurrentScrapesCoalesce(t *testing.T) {
+	t.Parallel()
+	var hits int64
+	mux := http.NewServeMux()
+	bodies := map[string]string{
+		"/data/getSysInfo.asp":     `[{"hwVersion":"1A","swVersion":"7.3","serialNumber":"S","rfMac":"M","systemUptime":"00h:05m:00s","systemTime":"x"}]`,
+		"/data/dsinfo.asp":         `[{"portId":"1","channelId":"20","frequency":"561000000","modulation":"2","signalStrength":"-1.1","snr":"38.9","dsoctets":"1","correcteds":"0","uncorrect":"0"}]`,
+		"/data/usinfo.asp":         `[{"portId":"1","channelId":"1","frequency":"1","bandwidth":"1","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.7"}]`,
+		"/data/getCMInit.asp":      `[{"hwInit":"Success","findDownstream":"Success","ranging":"Success","dhcp":"Success","timeOfday":"Success","downloadCfg":"Success","registration":"Success","eaeStatus":"Disable","bpiStatus":"AUTH:authorized, TEK:operational","networkAccess":"Permitted","trafficStatus":"Enable"}]`,
+		"/data/getCmDocsisWan.asp": `[{"Configname":"c","NetworkAccess":"Permitted","CmIpAddress":"::1"}]`,
+		"/data/system_model.asp":   `{"modelName":"CODA","vendorname":"HITRON"}`,
+	}
+	for path, body := range bodies {
+		b := body
+		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt64(&hits, 1)
+			time.Sleep(20 * time.Millisecond) // make overlap real
+			_, _ = w.Write([]byte(b))
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := NewCollector(NewClient(srv.URL, 3*time.Second), quietLogger(), 3*time.Second)
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	atomic.StoreInt64(&hits, 0) // ignore the Describe-time fetch
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := reg.Gather(); err != nil {
+				t.Errorf("Gather: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 6 endpoints for one shared fetch. Without coalescing this would be ~30.
+	if got := atomic.LoadInt64(&hits); got > 6 {
+		t.Errorf("5 concurrent scrapes made %d modem requests, want <=6 (one coalesced fetch)", got)
+	}
+}
+
+func mustGauge(t *testing.T, reg *prometheus.Registry, name string) prometheus.Collector {
+	t.Helper()
+	g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "shim"})
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() == name && len(mf.GetMetric()) == 1 {
+			g.Set(mf.GetMetric()[0].GetGauge().GetValue())
+			return g
+		}
+	}
+	t.Fatalf("%s not found", name)
+	return nil
+}

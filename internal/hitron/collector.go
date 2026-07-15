@@ -3,6 +3,7 @@ package hitron
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,6 +19,20 @@ const namespace = "modemscope"
 type Collector struct {
 	client *Client
 	log    *slog.Logger
+	budget time.Duration
+
+	// The modem's embedded server is fragile, so overlapping scrapes (two
+	// Prometheus replicas, or a human curling /metrics mid-scrape) must not each
+	// fan out into their own six requests. mu serializes them and ttl lets the
+	// waiter reuse the in-flight result instead of re-fetching. Rejecting the
+	// second scrape instead (promhttp's MaxRequestsInFlight) would protect the
+	// modem but report the exporter as down, which is a worse lie than a
+	// few-seconds-old sample.
+	mu         sync.Mutex
+	ttl        time.Duration
+	lastAt     time.Time
+	lastStatus *Status
+	lastErr    error
 
 	up             *prometheus.Desc
 	scrapeDuration *prometheus.Desc
@@ -40,13 +55,22 @@ type Collector struct {
 }
 
 // NewCollector returns a Collector reading from client.
-func NewCollector(client *Client, log *slog.Logger) *Collector {
+//
+// budget caps the total time spent talking to the modem during one scrape. It
+// must stay below Prometheus's scrape timeout: if the modem is slow rather than
+// dead, Prometheus giving up first means modemscope_up=0 never gets delivered —
+// the "modem is sick" signal is lost precisely when it matters.
+func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Collector {
 	dsLabels := []string{"channel", "port"}
 	usLabels := []string{"channel", "port"}
 
 	return &Collector{
 		client: client,
 		log:    log,
+		budget: budget,
+		// Well under any sane scrape interval, so each scrape still reads the
+		// modem afresh; long enough that concurrent scrapes coalesce.
+		ttl: 5 * time.Second,
 
 		up: prometheus.NewDesc(namespace+"_up",
 			"1 if the modem status endpoints were scraped successfully.", nil, nil),
@@ -101,11 +125,11 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.budget)
 	defer cancel()
 
 	start := time.Now()
-	status, err := c.client.Fetch(ctx)
+	status, err := c.fetch(ctx)
 	elapsed := time.Since(start).Seconds()
 
 	ch <- prometheus.MustNewConstMetric(c.scrapeDuration, prometheus.GaugeValue, elapsed)
@@ -165,6 +189,21 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(c.networkAcces, prometheus.GaugeValue,
 		boolToFloat(isSuccess(status.CMInit.NetworkAccess)))
+}
+
+// fetch reads the modem, coalescing concurrent scrapes onto one request set.
+// The lock is deliberately held across the I/O so a second scrape waits for the
+// in-flight result rather than starting a competing one.
+func (c *Collector) fetch(ctx context.Context) (*Status, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.lastAt.IsZero() && time.Since(c.lastAt) < c.ttl {
+		return c.lastStatus, c.lastErr
+	}
+	status, err := c.client.Fetch(ctx)
+	c.lastStatus, c.lastErr, c.lastAt = status, err, time.Now()
+	return status, err
 }
 
 // emit skips the metric when the firmware gives a non-numeric placeholder,

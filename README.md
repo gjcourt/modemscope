@@ -65,7 +65,7 @@ min(modemscope_docsis_init_state) == 0
 | --- | --- | --- |
 | `MODEMSCOPE_LISTEN_ADDR` | `:9104` | metrics listen address |
 | `MODEMSCOPE_MODEM_URL` | `https://192.168.100.1` | modem base URL |
-| `MODEMSCOPE_TIMEOUT` | `10s` | per-scrape HTTP timeout |
+| `MODEMSCOPE_TIMEOUT` | `8s` | total modem-I/O budget per scrape. Keep below Prometheus's scrape timeout, or a slow modem makes Prometheus give up before `modemscope_up=0` is delivered. |
 
 `/metrics` exposes the collector; `/healthz` reports only that the exporter is
 running — deliberately **not** whether the modem is reachable, since an

@@ -34,27 +34,37 @@ func run() error {
 	if modemURL == "" {
 		modemURL = "https://192.168.100.1"
 	}
-	timeout := 10 * time.Second
+	// Total budget for one scrape's worth of modem I/O. Keep it below the
+	// Prometheus scrape timeout (10s in the ServiceMonitor) — otherwise a slow
+	// modem makes Prometheus give up before modemscope_up=0 is delivered.
+	budget := 8 * time.Second
 	if v := os.Getenv("MODEMSCOPE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return err
 		}
-		timeout = d
+		budget = d
 	}
 
-	client := hitron.NewClient(modemURL, timeout)
+	// Fetch makes six sequential requests, so no single one may eat the budget.
+	client := hitron.NewClient(modemURL, budget)
 	log := slog.Default()
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		hitron.NewCollector(client, log),
+		hitron.NewCollector(client, log, budget),
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	// Concurrent scrapes are coalesced inside the collector (see hitron.fetch),
+	// so the modem is protected without rejecting a scrape here —
+	// MaxRequestsInFlight would 503 the second caller, which Prometheus reads as
+	// the exporter being down.
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+		Timeout: budget + time.Second,
+	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		// Liveness is "the exporter is running", deliberately not "the modem is
 		// reachable" — an unreachable modem is a metric (modemscope_up 0), not a
