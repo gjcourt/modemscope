@@ -54,6 +54,7 @@ type Collector struct {
 	networkAcces *prometheus.Desc
 
 	ofdmLocked      *prometheus.Desc
+	ofdmLockState   *prometheus.Desc
 	ofdmSNR         *prometheus.Desc
 	ofdmPower       *prometheus.Desc
 	ofdmFreq        *prometheus.Desc
@@ -133,8 +134,14 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 		// is where trouble shows up first. Watching only the QAM channels can
 		// report a clean line while the OFDM carrier is losing data.
 		ofdmLocked: prometheus.NewDesc(namespace+"_downstream_ofdm_locked",
-			"1 if this OFDM receiver has PLC lock. Unlocked receivers report no other values.",
+			"1 if this OFDM receiver holds all three locks (PLC, NCP, MDC1) and can carry traffic. "+
+				"PLC lock alone is not enough — see modemscope_downstream_ofdm_lock.",
 			[]string{"receiver"}, nil),
+		ofdmLockState: prometheus.NewDesc(namespace+"_downstream_ofdm_lock",
+			"Per-stage OFDM lock: 1 if held. Stages: plc, ncp, mdc1. A receiver with plc=1 but "+
+				"ncp=0 or mdc1=0 is only partially locked: it reports values while carrying nothing, "+
+				"so its error counters freeze and rate() misreads as a clean carrier.",
+			[]string{"receiver", "stage"}, nil),
 		ofdmSNR: prometheus.NewDesc(namespace+"_downstream_ofdm_snr_db",
 			"Downstream OFDM signal-to-noise ratio (dB).", []string{"receiver"}, nil),
 		ofdmPower: prometheus.NewDesc(namespace+"_downstream_ofdm_plc_power_dbmv",
@@ -177,7 +184,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 		c.dsSNR, c.dsPower, c.dsFreq, c.dsOctets, c.dsCorrected, c.dsUncorrect, c.dsChannels,
 		c.usPower, c.usFreq, c.usBandwidth, c.usChannels,
 		c.initState, c.networkAcces,
-		c.ofdmLocked, c.ofdmSNR, c.ofdmPower, c.ofdmFreq,
+		c.ofdmLocked, c.ofdmLockState, c.ofdmSNR, c.ofdmPower, c.ofdmFreq,
 		c.ofdmOctets, c.ofdmCorrected, c.ofdmUncorrect,
 		c.usOFDMEnabled, c.usOFDMFreq, c.usOFDMPower, c.usOFDMChannelBw,
 	} {
@@ -238,7 +245,17 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for _, oc := range status.DownstreamOFDM {
 		lbl := []string{oc.Receive}
 		ch <- prometheus.MustNewConstMetric(c.ofdmLocked, prometheus.GaugeValue,
-			boolToFloat(oc.Locked()), oc.Receive)
+			boolToFloat(oc.FullyLocked()), oc.Receive)
+		for stage, held := range map[string]bool{
+			"plc": yes(oc.PLCLock), "ncp": yes(oc.NCPLock), "mdc1": yes(oc.MDC1Lock),
+		} {
+			ch <- prometheus.MustNewConstMetric(c.ofdmLockState, prometheus.GaugeValue,
+				boolToFloat(held), oc.Receive, stage)
+		}
+		// Gate the values on PLC lock, not full lock: PLC lock is what makes the
+		// fields real rather than "NA". A partially-locked receiver's values are
+		// genuine and worth exporting — the lock stages above are what reveal that
+		// its frozen counters mean "carrying nothing", not "clean".
 		if !oc.Locked() {
 			// An unlocked receiver reports "NA" for everything else. parseFloat
 			// rejects those, but skip explicitly: exporting zeros here would read

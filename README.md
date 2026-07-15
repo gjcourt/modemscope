@@ -47,6 +47,8 @@ Uptime is the only signal that distinguishes the two.
 | `modemscope_downstream_ofdm_octets_total{receiver}` | OFDM octets. |
 | `modemscope_downstream_ofdm_subcarrier0_hz{receiver}` | OFDM subcarrier-0 frequency. |
 | `modemscope_upstream_ofdma_enabled{channel}` | 1 if upstream OFDMA is enabled (commonly 0 on Comcast; not a fault). |
+| `modemscope_upstream_ofdma_frequency_hz{channel}` / `..._power_dbmv` / `..._bandwidth_hz` | Upstream OFDMA shape; absent when the channel is disabled. |
+| `modemscope_downstream_ofdm_lock{receiver,stage}` | Per-stage OFDM lock (`plc`, `ncp`, `mdc1`). **`plc=1` with `ncp=0`/`mdc1=0` is a partial lock: values look real but counters freeze, so `rate()` misreads it as a clean carrier.** |
 | `modemscope_docsis_init_state{stage}` | 1 = healthy. Stages: `hw_init`, `find_downstream`, `ranging`, `dhcp`, `time_of_day`, `download_cfg`, `registration`, `bpi`, `traffic`. |
 | `modemscope_network_access` | 1 if the CMTS permits the modem on the network. |
 | `modemscope_scrape_duration_seconds` | Scrape latency (~0.2s typical). |

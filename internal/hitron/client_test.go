@@ -94,8 +94,9 @@ func fakeModem(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/data/usinfo.asp", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"portId":"1","frequency":"10400000","bandwidth":"3200000","modtype":"16QAM","scdmaMode":"ATDMA","signalStrength":"46.760","channelId":"1"}]`))
 	})
-	// Two OFDM receivers: an unused one ("NA" placeholders everywhere) and a
-	// locked one carrying real values — exactly what the CODA-56 returns.
+	// Two OFDM receivers: an unused one ("NA" placeholders everywhere) and a locked
+	// one carrying real values. Shapes are verbatim from the CODA-56; counter values
+	// are a point-in-time sample and drift from the live device.
 	mux.HandleFunc("/data/dsofdminfo.asp", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"receive":"0","ffttype":"NA","Subcarr0freqFreq":"NA","plclock":"NO","ncplock":"NO","mdc1lock":"NO","plcpower":"NA","SNR":"NA","dsoctets":"NA","correcteds":"NA","uncorrect":"NA"},{"receive":"1","ffttype":"4K","Subcarr0freqFreq":" 713600000","plclock":"YES","ncplock":"YES","mdc1lock":"YES","plcpower":"-5.200001","SNR":"38","dsoctets":"3211241","correcteds":"3206076","uncorrect":"1432"}]`))
 	})

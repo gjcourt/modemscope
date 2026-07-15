@@ -93,6 +93,117 @@ modemscope_network_access 1
 	}
 }
 
+// The OFDM path carries the diagnosis on a DOCSIS 3.1 line, so pin its exact
+// values. Without this, the whole OFDM block could be deleted — or report
+// correcteds in the uncorrectables series — and the suite would stay green.
+func TestCollectOFDM(t *testing.T) {
+	t.Parallel()
+	healthy := &atomic.Bool{}
+	healthy.Store(true)
+	srv := modemServer(t, healthy)
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newTestCollector(t, srv.URL)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Fixture: receiver 0 unlocked ("NA" everywhere), receiver 1 fully locked.
+	expected := `
+# HELP modemscope_downstream_ofdm_uncorrectables_total Uncorrectable codewords on the OFDM carrier — unrecoverable data, i.e. real loss. The most important error signal on a DOCSIS 3.1 line. Resets when the modem reboots.
+# TYPE modemscope_downstream_ofdm_uncorrectables_total counter
+modemscope_downstream_ofdm_uncorrectables_total{receiver="1"} 1432
+# HELP modemscope_downstream_ofdm_correcteds_total FEC-corrected codewords on the OFDM carrier. Resets when the modem reboots.
+# TYPE modemscope_downstream_ofdm_correcteds_total counter
+modemscope_downstream_ofdm_correcteds_total{receiver="1"} 3206076
+# HELP modemscope_downstream_ofdm_snr_db Downstream OFDM signal-to-noise ratio (dB).
+# TYPE modemscope_downstream_ofdm_snr_db gauge
+modemscope_downstream_ofdm_snr_db{receiver="1"} 38
+# HELP modemscope_downstream_ofdm_plc_power_dbmv Downstream OFDM PLC received power (dBmV).
+# TYPE modemscope_downstream_ofdm_plc_power_dbmv gauge
+modemscope_downstream_ofdm_plc_power_dbmv{receiver="1"} -5.200001
+# HELP modemscope_downstream_ofdm_subcarrier0_hz Downstream OFDM subcarrier-0 frequency (Hz).
+# TYPE modemscope_downstream_ofdm_subcarrier0_hz gauge
+modemscope_downstream_ofdm_subcarrier0_hz{receiver="1"} 7.136e+08
+# HELP modemscope_downstream_ofdm_locked 1 if this OFDM receiver holds all three locks (PLC, NCP, MDC1) and can carry traffic. PLC lock alone is not enough — see modemscope_downstream_ofdm_lock.
+# TYPE modemscope_downstream_ofdm_locked gauge
+modemscope_downstream_ofdm_locked{receiver="0"} 0
+modemscope_downstream_ofdm_locked{receiver="1"} 1
+# HELP modemscope_upstream_ofdma_enabled 1 if this upstream OFDMA channel is enabled. Commonly 0 on Comcast; not a fault.
+# TYPE modemscope_upstream_ofdma_enabled gauge
+modemscope_upstream_ofdma_enabled{channel="0"} 0
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
+		"modemscope_downstream_ofdm_uncorrectables_total",
+		"modemscope_downstream_ofdm_correcteds_total",
+		"modemscope_downstream_ofdm_snr_db",
+		"modemscope_downstream_ofdm_plc_power_dbmv",
+		"modemscope_downstream_ofdm_subcarrier0_hz",
+		"modemscope_downstream_ofdm_locked",
+		"modemscope_upstream_ofdma_enabled"); err != nil {
+		t.Error(err)
+	}
+
+	// The unlocked receiver's "NA" fields must be ABSENT, not 0 — a 0 SNR would
+	// read as a catastrophically bad channel, a 0 counter as a perfectly clean one.
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if !strings.HasPrefix(mf.GetName(), "modemscope_downstream_ofdm_") ||
+			mf.GetName() == "modemscope_downstream_ofdm_locked" ||
+			mf.GetName() == "modemscope_downstream_ofdm_lock" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "receiver" && l.GetValue() == "0" {
+					t.Errorf("%s present for the unlocked receiver 0; NA fields must be absent", mf.GetName())
+				}
+			}
+		}
+	}
+
+	// Disabled OFDMA must not publish a fabricated 0.0000 transmit power.
+	for _, mf := range mfs {
+		if mf.GetName() == "modemscope_upstream_ofdma_power_dbmv" {
+			t.Error("upstream_ofdma_power_dbmv present for a DISABLED channel; must be absent")
+		}
+	}
+}
+
+// Partial lock is the case that would silently misreport a failing carrier as
+// clean: values look real, but the counters freeze so rate() reads zero.
+func TestOFDMPartialLock(t *testing.T) {
+	t.Parallel()
+	partial := DSOFDMChannel{PLCLock: "YES", NCPLock: "NO", MDC1Lock: "NO"}
+	if !partial.Locked() {
+		t.Error("Locked() = false; PLC lock means the fields are parseable")
+	}
+	if partial.FullyLocked() {
+		t.Error("FullyLocked() = true with ncp/mdc1 NO; it cannot carry traffic")
+	}
+	full := DSOFDMChannel{PLCLock: "YES", NCPLock: "YES", MDC1Lock: "YES"}
+	if !full.FullyLocked() {
+		t.Error("FullyLocked() = false with all three locks held")
+	}
+}
+
+// An unrecognized OFDMA state must not default to enabled and publish a fake 0
+// transmit power, which for an upstream radio reads as dead rather than absent.
+func TestOFDMAEnabledRequiresRealFrequency(t *testing.T) {
+	t.Parallel()
+	for _, state := range []string{"  DISABLED", "DISABLE", "", "NA", "UNKNOWN"} {
+		c := USOFDMChannel{State: state, Frequency: "0", RepPower: "    0.0000"}
+		if c.Enabled() {
+			t.Errorf("Enabled() = true for state %q with frequency 0", state)
+		}
+	}
+	if !(USOFDMChannel{State: "ACTIVE", Frequency: "35600000"}).Enabled() {
+		t.Error("Enabled() = false for a channel with a real frequency")
+	}
+}
+
 // Error counters must be counters, not gauges: they reset on every modem reboot,
 // and only a counter lets rate()/increase() handle the reset correctly.
 func TestErrorCountersAreCounters(t *testing.T) {
@@ -115,6 +226,13 @@ func TestErrorCountersAreCounters(t *testing.T) {
 		"modemscope_downstream_octets_total":         "COUNTER",
 		"modemscope_uptime_seconds":                  "GAUGE",
 		"modemscope_downstream_snr_db":               "GAUGE",
+		// The OFDM counters matter most on a 3.1 line; as gauges rate() would
+		// break across the modem's frequent reboots.
+		"modemscope_downstream_ofdm_uncorrectables_total": "COUNTER",
+		"modemscope_downstream_ofdm_correcteds_total":     "COUNTER",
+		"modemscope_downstream_ofdm_octets_total":         "COUNTER",
+		"modemscope_downstream_ofdm_snr_db":               "GAUGE",
+		"modemscope_downstream_ofdm_locked":               "GAUGE",
 	}
 	seen := map[string]string{}
 	for _, mf := range mfs {

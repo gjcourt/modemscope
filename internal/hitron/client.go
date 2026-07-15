@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -100,11 +101,26 @@ type DSOFDMChannel struct {
 	Uncorrect  string `json:"uncorrect"`
 }
 
-// Locked reports whether this OFDM receiver is carrying traffic. An unlocked
-// receiver's other fields are "NA" placeholders and must not be exported as 0.
+// Locked reports whether this OFDM receiver has PLC lock, which is what decides
+// whether its other fields hold real values or "NA" placeholders.
+//
+// PLC lock alone does NOT mean the receiver is decoding traffic: PLC lock comes
+// first, and NCP/MDC1 lock can still be absent. Such a receiver reports values
+// while carrying nothing, so its frozen counters would make rate() read zero —
+// "the OFDM carrier is clean" — during precisely the marginal condition this
+// exporter exists to catch. Use FullyLocked to judge health; use Locked only to
+// decide whether the fields are parseable.
 func (c DSOFDMChannel) Locked() bool {
-	return strings.EqualFold(strings.TrimSpace(c.PLCLock), "yes")
+	return yes(c.PLCLock)
 }
+
+// FullyLocked reports whether all three locks are held, i.e. the receiver is
+// actually able to carry traffic.
+func (c DSOFDMChannel) FullyLocked() bool {
+	return yes(c.PLCLock) && yes(c.NCPLock) && yes(c.MDC1Lock)
+}
+
+func yes(v string) bool { return strings.EqualFold(strings.TrimSpace(v), "yes") }
 
 // USOFDMChannel is one upstream OFDMA channel from /data/usofdminfo.asp.
 type USOFDMChannel struct {
@@ -119,8 +135,18 @@ type USOFDMChannel struct {
 
 // Enabled reports whether this OFDMA channel is in use. Comcast commonly leaves
 // upstream OFDMA disabled, which is not a fault.
+//
+// Keyed on a real frequency rather than the state string. A disabled channel
+// reports frequency "0" alongside "0.0000" power, and no enabled-state string
+// has been observed on this firmware — so trusting the string would default any
+// unrecognized value to "enabled" and publish that 0.0000 as a genuine transmit
+// power, which for an upstream radio reads as dead rather than absent.
 func (c USOFDMChannel) Enabled() bool {
-	return !strings.EqualFold(strings.TrimSpace(c.State), "disabled")
+	if strings.EqualFold(strings.TrimSpace(c.State), "disabled") {
+		return false
+	}
+	f, ok := parseFloat(c.Frequency)
+	return ok && f > 0
 }
 
 // CMInit is /data/getCMInit.asp — the DOCSIS registration state machine.
@@ -155,6 +181,10 @@ type Status struct {
 	UpstreamOFDM   []USOFDMChannel
 	CMInit         CMInit
 	DocsisWan      DocsisWan
+
+	// OFDMErr records a failure to read the OFDM endpoints. It does not fail the
+	// scrape (see Fetch); callers surface it as absent OFDM series.
+	OFDMErr error
 }
 
 func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
@@ -218,11 +248,19 @@ func (c *Client) Fetch(ctx context.Context) (*Status, error) {
 	if s.Upstream, err = getSlice[USChannel](ctx, c, "/data/usinfo.asp"); err != nil {
 		return nil, err
 	}
+	// The OFDM endpoints are tolerated rather than required. They are the newest
+	// and least-portable part of the surface, and making them hard dependencies
+	// would mean a firmware variation on one of them blinds the whole instrument
+	// — uptime, QAM channels and registration state would all vanish behind
+	// up=0. A missing slice costs only the OFDM series.
 	if s.DownstreamOFDM, err = getSlice[DSOFDMChannel](ctx, c, "/data/dsofdminfo.asp"); err != nil {
-		return nil, err
+		s.DownstreamOFDM, s.OFDMErr = nil, err
 	}
 	if s.UpstreamOFDM, err = getSlice[USOFDMChannel](ctx, c, "/data/usofdminfo.asp"); err != nil {
-		return nil, err
+		s.UpstreamOFDM = nil
+		if s.OFDMErr == nil {
+			s.OFDMErr = err
+		}
 	}
 	if s.CMInit, err = getOne[CMInit](ctx, c, "/data/getCMInit.asp"); err != nil {
 		return nil, err
@@ -275,6 +313,11 @@ func parseFloat(s string) (float64, bool) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
+		return 0, false
+	}
+	// A single NaN/Inf sample poisons rate() and sum() for the whole series, so
+	// treat them as placeholders too — absence is recoverable, poison is not.
+	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, false
 	}
 	return f, true
