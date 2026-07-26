@@ -5,6 +5,9 @@ speed test can't: **was that outage my network, or the ISP's line?**
 
 Verified against a **Hitron CODA-56** (DOCSIS 3.1, sw `7.3.5.3.2b1`) on Comcast.
 
+> For how the exporter is built — components, scrape flow, the modem interface,
+> and design decisions — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## Why
 
 The modem's own status pages carry the cable plant's vital signs — per-channel
