@@ -1,29 +1,21 @@
 # modemscope
 
-Prometheus exporter for Hitron DOCSIS cable modems. Answers the question a
-speed test can't: **was that outage my network, or the ISP's line?**
+Prometheus exporter for Hitron DOCSIS cable modems. It polls the modem's own
+status pages — the ones a speed test never looks at — and turns per-channel
+SNR, transmit/receive power, and FEC error counters into a queryable history,
+so an intermittent line problem leaves evidence behind instead of vanishing
+the moment the modem reboots.
 
-Verified against a **Hitron CODA-56** (DOCSIS 3.1, sw `7.3.5.3.2b1`) on Comcast.
+Every error counter the modem exposes resets on reboot, so
+`modemscope_uptime_seconds` is what makes the rest of them interpretable: "0
+uncorrectables" means nothing on its own — it could be a clean line, or a
+modem that restarted a minute ago.
 
-> For how the exporter is built — components, scrape flow, the modem interface,
-> and design decisions — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Verified against a **Hitron CODA-56** (DOCSIS 3.1, sw `7.3.5.3.2b1`) on
+Comcast. Serves metrics on `:9104`.
 
-## Why
-
-The modem's own status pages carry the cable plant's vital signs — per-channel
-SNR, transmit/receive power, and FEC error counters — plus the DOCSIS
-registration state machine. None of it is retained: it's a live view that resets
-whenever the modem reboots, and nothing polls it. So an intermittent problem
-leaves no evidence behind, and by the time you look, the numbers are innocent.
-
-modemscope polls it every scrape and hands Prometheus the history.
-
-**The most important metric is `modemscope_uptime_seconds`.** Every error counter
-the modem exposes resets on reboot, so "0 uncorrectables" means nothing on its
-own — it might mean a clean line, or a modem that restarted a minute ago. A
-silently rebooting modem is invisible to every other check you have: ping
-recovers, the speed test passes, and the outage looks like it never happened.
-Uptime is the only signal that distinguishes the two.
+> For how the exporter is built — components, scrape flow, the modem
+> interface, and design decisions — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Metrics
 
@@ -42,7 +34,7 @@ Uptime is the only signal that distinguishes the two.
 | `modemscope_upstream_power_dbmv{channel,port}` | Upstream transmit power. Healthy ≈ 35..51 dBmV. |
 | `modemscope_upstream_frequency_hz{channel,port}` / `..._bandwidth_hz{..}` | Upstream channel shape. |
 | `modemscope_upstream_channels` | Bonded upstream channel count. |
-| `modemscope_downstream_ofdm_locked{receiver}` | 1 if the OFDM receiver has PLC lock. |
+| `modemscope_downstream_ofdm_locked{receiver}` | 1 if the OFDM receiver holds all three locks (PLC, NCP, MDC1). |
 | `modemscope_downstream_ofdm_snr_db{receiver}` | **DOCSIS 3.1 OFDM SNR.** |
 | `modemscope_downstream_ofdm_plc_power_dbmv{receiver}` | OFDM PLC received power. |
 | `modemscope_downstream_ofdm_uncorrectables_total{receiver}` | **Uncorrectables on the OFDM carrier — the single most important error signal on a 3.1 line.** |
@@ -79,7 +71,9 @@ resets(modemscope_uptime_seconds[15m]) > 0
 min(modemscope_docsis_init_state) == 0
 ```
 
-## Config
+## Configuration
+
+Three environment variables, all optional:
 
 | Env | Default | |
 | --- | --- | --- |
@@ -87,14 +81,30 @@ min(modemscope_docsis_init_state) == 0
 | `MODEMSCOPE_MODEM_URL` | `https://192.168.100.1` | modem base URL |
 | `MODEMSCOPE_TIMEOUT` | `8s` | total modem-I/O budget per scrape. Keep below Prometheus's scrape timeout, or a slow modem makes Prometheus give up before `modemscope_up=0` is delivered. |
 
+## Running / Deployment
+
+```sh
+go run ./cmd/agent
+curl localhost:9104/metrics
+```
+
 `/metrics` exposes the collector; `/healthz` reports only that the exporter is
 running — deliberately **not** whether the modem is reachable, since an
-unreachable modem is a metric worth alerting on, not a reason to restart the pod.
+unreachable modem is a metric worth alerting on, not a reason to restart the
+pod.
+
+CI builds and pushes the image to `ghcr.io/gjcourt/modemscope` on every push
+to `main`, tagging it additively as `main`, `<sha7>`, `YYYY-MM-DD`, the
+immutable `YYYY-MM-DD-<sha7>`, and `latest`. In the homelab it runs as a
+single-replica Deployment, pinned by tag and digest in
+`homelab/apps/base/modemscope/deployment.yaml` and rolled out via GitOps —
+bump the pin there to deploy a new build, don't repoint `latest`.
 
 ## Notes on the modem
 
 - The endpoints (`/data/getSysInfo.asp`, `dsinfo.asp`, `usinfo.asp`,
-  `getCMInit.asp`, `getCmDocsisWan.asp`, `system_model.asp`) are **unauthenticated**.
+  `dsofdminfo.asp`, `usofdminfo.asp`, `getCMInit.asp`, `getCmDocsisWan.asp`,
+  `system_model.asp`) are **unauthenticated**.
 - TLS verification is skipped: the modem presents a CableLabs-issued cert whose
   CN is its own MAC, which can't validate against a normal chain.
 - It runs a small embedded GoAhead server. Endpoints are polled **sequentially**
@@ -105,10 +115,17 @@ unreachable modem is a metric worth alerting on, not a reason to restart the pod
 - `system_model.asp` returns a bare object; every other endpoint wraps a single
   object in an array.
 
-## Develop
+## Development
+
+Go 1.23.
 
 ```sh
 go test ./...
-go run ./cmd/agent          # then: curl localhost:9104/metrics
-make build                  # ghcr.io/gjcourt/modemscope:dev
+go vet ./...
+gofmt -l .
+make build   # docker buildx build ... -t ghcr.io/gjcourt/modemscope:dev
+make tidy    # go mod tidy
 ```
+
+CI (`.github/workflows/build.yml`) runs gofmt, `go vet`, `go test`, and a
+`go mod tidy` diff check on every pull request and on push to `main`.
