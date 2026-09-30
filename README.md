@@ -10,7 +10,8 @@ reboot, so an intermittent line problem leaves no evidence by the time you
 look. modemscope polls a Hitron modem every scrape and hands Prometheus the
 history instead, so `rate()` over the error counters actually means something.
 
-**Status:** in daily use on the homelab since 2026-07-26; hardware-confirmed
+**Status:** in daily use on the homelab since 2026-07 (currently pinned to
+`2026-07-26-e2a59cd`); hardware-confirmed
 against a Hitron CODA-56 (DOCSIS 3.1, sw `7.3.5.3.2b1`) on Comcast.
 
 ```text
