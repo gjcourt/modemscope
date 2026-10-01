@@ -140,4 +140,4 @@ repoint `latest`.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)
