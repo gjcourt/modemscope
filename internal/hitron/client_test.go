@@ -87,8 +87,10 @@ func TestModulationName(t *testing.T) {
 		// The modem's own UI table; code 2 is the one observed on live channels.
 		"0": "16QAM", "1": "64QAM", "2": "256QAM", "3": "1024QAM",
 		"4": "32QAM", "5": "128QAM", "6": "QPSK",
-		" 2 ": "256QAM",    // padding is trimmed
-		"9":   "9", "": "", // anything else passes through unchanged
+		" 2 ": "256QAM", // padding is trimmed
+		"9":   "9",      // anything else passes through unchanged
+		// Firmware placeholders mean "no reading", not a modulation.
+		"": "", "TODO": "", "--": "", "NA": "",
 	} {
 		if got := ModulationName(in); got != want {
 			t.Errorf("ModulationName(%q) = %q, want %q", in, got, want)
