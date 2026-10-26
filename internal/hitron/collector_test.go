@@ -181,6 +181,33 @@ modemscope_upstream_ofdma_enabled{channel="0"} 0
 	}
 }
 
+// The OFDMA power fields, from an enabled channel on a Hitron CODA-57
+// (sw 7.3.5.3.3b2). repPower covers the whole 16 MHz channel; repPower1_6 is the
+// same power normalised to 1.6 MHz, exactly 10*log10(16/1.6) = 10 dB lower.
+func TestCollectOFDMAPower(t *testing.T) {
+	t.Parallel()
+	srv := modemServerWith(t, nil, map[string]string{
+		"/data/usofdminfo.asp": `[{"uschindex":"0","state":"   OPERATE","frequency":"4600000","digAtten":"    0.2048","digAttenBo":"    8.6473","channelBw":"   16.0000","repPower":"   57.5000","repPower1_6":"   47.5000","fftVal":"2K"},{"uschindex":"1","state":"  DISABLED","frequency":"0","digAtten":"    0.0000","digAttenBo":"    0.0000","channelBw":"    0.0000","repPower":"    0.0000","repPower1_6":"    0.0000","fftVal":"2K"}]`,
+	})
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(newTestCollector(t, srv.URL)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// The disabled channel 1 must publish neither power: its 0.0000 would read as a dead radio.
+	expected := `
+# HELP modemscope_upstream_ofdma_power_dbmv Upstream OFDMA reported transmit power (dBmV), total over the whole channel bandwidth.
+# TYPE modemscope_upstream_ofdma_power_dbmv gauge
+modemscope_upstream_ofdma_power_dbmv{channel="0"} 57.5
+# HELP modemscope_upstream_ofdma_power_1_6mhz_dbmv Upstream OFDMA transmit power normalised to 1.6 MHz (dBmV). Unlike the total, this does not grow with channel width, so it is the figure to compare against the QAM channels' power.
+# TYPE modemscope_upstream_ofdma_power_1_6mhz_dbmv gauge
+modemscope_upstream_ofdma_power_1_6mhz_dbmv{channel="0"} 47.5
+`
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected),
+		"modemscope_upstream_ofdma_power_dbmv", "modemscope_upstream_ofdma_power_1_6mhz_dbmv"); err != nil {
+		t.Error(err)
+	}
+}
+
 // Partial lock is the case that would silently misreport a failing carrier as
 // clean: values look real, but the counters freeze so rate() reads zero.
 func TestOFDMPartialLock(t *testing.T) {
