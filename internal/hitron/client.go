@@ -132,8 +132,8 @@ type USOFDMChannel struct {
 	RepPower  string `json:"repPower"`
 	FFTVal    string `json:"fftVal"`
 
-	// RepPower1_6 is repPower normalised to 1.6 MHz, i.e. 10*log10(channelBw/1.6)
-	// lower than the whole-channel total.
+	// RepPower1_6 is repPower normalised to 1.6 MHz. On the one sample observed so
+	// far it read 10*log10(channelBw/1.6) lower than the whole-channel total.
 	RepPower1_6 string `json:"repPower1_6"`
 }
 
@@ -309,10 +309,20 @@ func ParseUptime(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// isPlaceholder reports whether s is one of the empty/placeholder values the
+// firmware emits in place of a real reading.
+func isPlaceholder(s string) bool {
+	switch strings.TrimSpace(s) {
+	case "", "TODO", "--", "NA":
+		return true
+	}
+	return false
+}
+
 // parseFloat is tolerant of the empty/placeholder values the firmware emits.
 func parseFloat(s string) (float64, bool) {
 	s = strings.TrimSpace(s)
-	if s == "" || s == "TODO" || s == "--" {
+	if isPlaceholder(s) {
 		return 0, false
 	}
 	f, err := strconv.ParseFloat(s, 64)
@@ -344,9 +354,12 @@ var downstreamModulations = map[string]string{
 
 // ModulationName returns the name for a downstream modulation code, or the raw
 // code when it is not in the table, so an unknown value is visible rather than
-// mislabelled. An empty code returns "".
+// mislabelled. An empty or placeholder code returns "".
 func ModulationName(code string) string {
 	code = strings.TrimSpace(code)
+	if isPlaceholder(code) {
+		return ""
+	}
 	if name, ok := downstreamModulations[code]; ok {
 		return name
 	}

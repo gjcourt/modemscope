@@ -198,7 +198,7 @@ func TestCollectOFDMAPower(t *testing.T) {
 # HELP modemscope_upstream_ofdma_power_dbmv Upstream OFDMA reported transmit power (dBmV), total over the whole channel bandwidth.
 # TYPE modemscope_upstream_ofdma_power_dbmv gauge
 modemscope_upstream_ofdma_power_dbmv{channel="0"} 57.5
-# HELP modemscope_upstream_ofdma_power_1_6mhz_dbmv Upstream OFDMA transmit power normalised to 1.6 MHz (dBmV). Unlike the total, this does not grow with channel width, so it is the figure to compare against the QAM channels' power.
+# HELP modemscope_upstream_ofdma_power_1_6mhz_dbmv Upstream OFDMA transmit power normalised to 1.6 MHz (dBmV). Independent of channel width; a 6.4 MHz QAM channel at the same power density reads ~6 dB higher.
 # TYPE modemscope_upstream_ofdma_power_1_6mhz_dbmv gauge
 modemscope_upstream_ofdma_power_1_6mhz_dbmv{channel="0"} 47.5
 `
@@ -258,7 +258,7 @@ func TestCollectOFDMAEnabled(t *testing.T) {
 # HELP modemscope_upstream_ofdma_bandwidth_hz Upstream OFDMA channel bandwidth (Hz).
 # TYPE modemscope_upstream_ofdma_bandwidth_hz gauge
 modemscope_upstream_ofdma_bandwidth_hz{channel="0"} 1.6e+07
-# HELP modemscope_upstream_ofdma_frequency_hz Upstream OFDMA subcarrier-0 frequency (Hz): the low edge of the channel, not its centre.
+# HELP modemscope_upstream_ofdma_frequency_hz Upstream OFDMA subcarrier-0 frequency (Hz): the bottom of the channel's subcarrier span, not its centre.
 # TYPE modemscope_upstream_ofdma_frequency_hz gauge
 modemscope_upstream_ofdma_frequency_hz{channel="0"} 4.6e+06
 # HELP modemscope_upstream_ofdma_enabled 1 if this upstream OFDMA channel is enabled. Commonly 0 on Comcast; not a fault.

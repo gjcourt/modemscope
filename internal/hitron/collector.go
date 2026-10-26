@@ -48,11 +48,11 @@ type Collector struct {
 	dsUncorrect  *prometheus.Desc
 	dsChannels   *prometheus.Desc
 	dsModulation *prometheus.Desc
-	usModulation *prometheus.Desc
 	usPower      *prometheus.Desc
 	usFreq       *prometheus.Desc
 	usBandwidth  *prometheus.Desc
 	usChannels   *prometheus.Desc
+	usModulation *prometheus.Desc
 	initState    *prometheus.Desc
 	networkAcces *prometheus.Desc
 
@@ -117,15 +117,12 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 		dsChannels: prometheus.NewDesc(namespace+"_downstream_channels",
 			"Number of bonded downstream channels. A drop means channels fell off.", nil, nil),
 
-		// Info-style: always 1, the value is in the labels. A channel stepping down to a
-		// lower modulation shows up as its series changing label, which is one of the
-		// earliest signs of an impairment.
+		// Info-style: always 1, the value is in the labels. Downstream modulation is
+		// set per channel by the CMTS, so this reflects CMTS configuration rather than
+		// line health; see usModulation for the upstream side.
 		dsModulation: prometheus.NewDesc(namespace+"_downstream_modulation_info",
 			"Downstream channel modulation. Always 1. Codes outside the modem's known table are shown raw.",
 			[]string{"channel", "port", "modulation"}, nil),
-		usModulation: prometheus.NewDesc(namespace+"_upstream_modulation_info",
-			"Upstream channel modulation and DOCSIS mode. Always 1.",
-			[]string{"channel", "port", "modulation", "mode"}, nil),
 
 		usPower: prometheus.NewDesc(namespace+"_upstream_power_dbmv",
 			"Upstream transmit power (dBmV). Healthy range is roughly 35..51; sustained highs mean the modem is straining.",
@@ -136,6 +133,11 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 			"Upstream channel bandwidth (Hz).", usLabels, nil),
 		usChannels: prometheus.NewDesc(namespace+"_upstream_channels",
 			"Number of bonded upstream channels.", nil, nil),
+		// Info-style, like dsModulation. An upstream channel stepping down to a lower
+		// modulation shows up as its series changing label, an early sign of trouble.
+		usModulation: prometheus.NewDesc(namespace+"_upstream_modulation_info",
+			"Upstream channel modulation and DOCSIS mode. Always 1.",
+			[]string{"channel", "port", "modulation", "mode"}, nil),
 
 		initState: prometheus.NewDesc(namespace+"_docsis_init_state",
 			"DOCSIS registration stage: 1 if healthy, 0 otherwise. A stage flipping to 0 means the modem is re-registering.",
@@ -176,13 +178,13 @@ func NewCollector(client *Client, log *slog.Logger, budget time.Duration) *Colle
 			"1 if this upstream OFDMA channel is enabled. Commonly 0 on Comcast; not a fault.",
 			[]string{"channel"}, nil),
 		usOFDMFreq: prometheus.NewDesc(namespace+"_upstream_ofdma_frequency_hz",
-			"Upstream OFDMA subcarrier-0 frequency (Hz): the low edge of the channel, not its centre.", []string{"channel"}, nil),
+			"Upstream OFDMA subcarrier-0 frequency (Hz): the bottom of the channel's subcarrier span, not its centre.", []string{"channel"}, nil),
 		usOFDMPower: prometheus.NewDesc(namespace+"_upstream_ofdma_power_dbmv",
 			"Upstream OFDMA reported transmit power (dBmV), total over the whole channel bandwidth.",
 			[]string{"channel"}, nil),
 		usOFDMPower16: prometheus.NewDesc(namespace+"_upstream_ofdma_power_1_6mhz_dbmv",
-			"Upstream OFDMA transmit power normalised to 1.6 MHz (dBmV). Unlike the total, this does not "+
-				"grow with channel width, so it is the figure to compare against the QAM channels' power.",
+			"Upstream OFDMA transmit power normalised to 1.6 MHz (dBmV). Independent of channel width; "+
+				"a 6.4 MHz QAM channel at the same power density reads ~6 dB higher.",
 			[]string{"channel"}, nil),
 		usOFDMChannelBw: prometheus.NewDesc(namespace+"_upstream_ofdma_bandwidth_hz",
 			"Upstream OFDMA channel bandwidth (Hz).", []string{"channel"}, nil),
@@ -201,8 +203,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{
 		c.up, c.scrapeDuration, c.info, c.uptime,
 		c.dsSNR, c.dsPower, c.dsFreq, c.dsOctets, c.dsCorrected, c.dsUncorrect, c.dsChannels,
-		c.dsModulation, c.usModulation,
-		c.usPower, c.usFreq, c.usBandwidth, c.usChannels,
+		c.dsModulation,
+		c.usPower, c.usFreq, c.usBandwidth, c.usChannels, c.usModulation,
 		c.initState, c.networkAcces,
 		c.ofdmLocked, c.ofdmLockState, c.ofdmSNR, c.ofdmPower, c.ofdmFreq,
 		c.ofdmOctets, c.ofdmCorrected, c.ofdmUncorrect,
@@ -264,7 +266,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		emit(ch, c.usPower, prometheus.GaugeValue, uc.SignalStrength, lbl)
 		emit(ch, c.usFreq, prometheus.GaugeValue, uc.Frequency, lbl)
 		emit(ch, c.usBandwidth, prometheus.GaugeValue, uc.Bandwidth, lbl)
-		if m := strings.TrimSpace(uc.ModType); m != "" {
+		if m := strings.TrimSpace(uc.ModType); !isPlaceholder(m) {
 			ch <- prometheus.MustNewConstMetric(c.usModulation, prometheus.GaugeValue, 1,
 				uc.ChannelID, uc.PortID, m, strings.TrimSpace(uc.SCDMAMode))
 		}
@@ -305,9 +307,9 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		if !uo.Enabled() {
 			continue
 		}
-		emit(ch, c.usOFDMPower16, prometheus.GaugeValue, uo.RepPower1_6, lbl)
 		emit(ch, c.usOFDMFreq, prometheus.GaugeValue, uo.Frequency, lbl)
 		emit(ch, c.usOFDMPower, prometheus.GaugeValue, uo.RepPower, lbl)
+		emit(ch, c.usOFDMPower16, prometheus.GaugeValue, uo.RepPower1_6, lbl)
 		// channelBw is reported in MHz ("16.0000"), unlike the Hz-valued QAM bandwidth.
 		emitScaled(ch, c.usOFDMChannelBw, prometheus.GaugeValue, uo.ChannelBw, lbl, 1e6)
 	}
